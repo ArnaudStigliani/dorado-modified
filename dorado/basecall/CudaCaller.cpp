@@ -351,7 +351,7 @@ void CudaCaller::determine_batch_dims(float memory_limit_fraction,
                           time_this_iteration);
         }
 
-        spdlog::debug("Auto batchsize {}: {}, time per chunk {:8f} ms", m_device, batch_size, time);
+        // spdlog::debug("Auto batchsize {}: {}, time per chunk {:8f} ms", m_device, batch_size, time);
         if (time < best_time) {
             best_time = time;
             times_and_batch_sizes.emplace_back(time, batch_size);

@@ -13,7 +13,7 @@ class SimplexRead;
 
 namespace dorado::poly_tail {
 
-struct SignalAnchorInfo {
+  struct SignalAnchorInfo {
     // Is the strand in forward or reverse direction.
     bool is_fwd_strand = true;
     // The start or end anchor for the polyA/T signal
@@ -26,12 +26,11 @@ struct SignalAnchorInfo {
     // Whether the polyA/T tail is split between the front/end of the read
     // This can only be true for plasmids
     bool split_tail = false;
-};
-
+  };
+  
 class PolyTailCalculator {
 public:
-    PolyTailCalculator(PolyTailConfig config) : m_config(std::move(config)) {}
-
+ PolyTailCalculator(PolyTailConfig config, const std::string& debug_path) : m_config(std::move(config)), m_debug_path(debug_path) {}
     virtual ~PolyTailCalculator() = default;
 
     // returns information about the polyA/T tail. signal_anchor = -1 on failure
@@ -40,7 +39,7 @@ public:
     // returns the number of bases in the polyA/T tail, or -1 on failure
     int calculate_num_bases(const dorado::SimplexRead& read,
                             const SignalAnchorInfo& signal_info) const;
-
+    
     static int max_tail_length() { return 750; };
 
 protected:
@@ -49,10 +48,10 @@ protected:
 
     // Returns any adjustment required for the provided signal_len
     virtual int signal_length_adjustment(int signal_len) const = 0;
-
+    
     // Floor for average signal value of poly tail.
     virtual float min_avg_val() const = 0;
-
+    
     // Determine the outer boundary of the signal space to consider based on the anchor.
     virtual std::pair<int, int> signal_range(int signal_anchor,
                                              int signal_len,
@@ -67,12 +66,14 @@ protected:
                                                 float num_samples_per_base) const;
 
     const PolyTailConfig m_config;
+    const std::string& m_debug_path;
 };
 
 class PolyTailCalculatorFactory {
 public:
     static std::shared_ptr<const PolyTailCalculator> create(bool is_rna,
-                                                            const std::string& config_file);
+                                                            const std::string& config_file,
+							    const std::string& debug_path);
 };
 
 }  // namespace dorado::poly_tail

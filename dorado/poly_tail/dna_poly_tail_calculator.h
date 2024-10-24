@@ -6,8 +6,8 @@ namespace dorado::poly_tail {
 
 class DNAPolyTailCalculator : public PolyTailCalculator {
 public:
-    DNAPolyTailCalculator(PolyTailConfig config) : PolyTailCalculator(std::move(config)) {}
-    SignalAnchorInfo determine_signal_anchor_and_strand(const SimplexRead& read) const override;
+ DNAPolyTailCalculator(PolyTailConfig config,  const std::string& debug_path) : PolyTailCalculator(std::move(config), debug_path) {}
+  SignalAnchorInfo determine_signal_anchor_and_strand(const SimplexRead& read) const override;
 
 protected:
     float average_samples_per_base(const std::vector<float>& sizes) const override;

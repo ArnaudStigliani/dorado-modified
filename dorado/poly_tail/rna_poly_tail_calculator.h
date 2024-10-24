@@ -6,7 +6,7 @@ namespace dorado::poly_tail {
 
 class RNAPolyTailCalculator : public PolyTailCalculator {
 public:
-    RNAPolyTailCalculator(PolyTailConfig config) : PolyTailCalculator(std::move(config)) {}
+ RNAPolyTailCalculator(PolyTailConfig config, const std::string& debug_path) : PolyTailCalculator(std::move(config),debug_path) {}
     SignalAnchorInfo determine_signal_anchor_and_strand(const SimplexRead& read) const override;
 
 protected:

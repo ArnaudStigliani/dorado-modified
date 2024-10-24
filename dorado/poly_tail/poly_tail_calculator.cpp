@@ -11,6 +11,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+
+namespace fs = std::filesystem;
 
 namespace dorado::poly_tail {
 
@@ -23,16 +26,19 @@ float PolyTailCalculator::estimate_samples_per_base(const dorado::SimplexRead& r
     const auto num_samples = read.read_common.get_raw_data_samples();
     const auto stride = read.read_common.model_stride;
     const auto seq_to_sig_map =
-            dorado::utils::moves_to_map(read.read_common.moves, stride, num_samples, num_bases + 1);
+      dorado::utils::moves_to_map(read.read_common.moves, stride, num_samples, num_bases + 1);
     // Store the samples per base in float to use the quantile calcuation function.
     std::vector<float> sizes(seq_to_sig_map.size() - 1, 0.f);
     for (int i = 1; i < int(seq_to_sig_map.size()); i++) {
-        sizes[i - 1] = static_cast<float>(seq_to_sig_map[i] - seq_to_sig_map[i - 1]);
+      sizes[i - 1] = static_cast<float>(seq_to_sig_map[i] - seq_to_sig_map[i - 1]);
     }
-
+    
     return average_samples_per_base(sizes);
 }
 
+
+
+  
 std::pair<int, int> PolyTailCalculator::determine_signal_bounds(int signal_anchor,
                                                                 bool fwd,
                                                                 const dorado::SimplexRead& read,
@@ -58,7 +64,7 @@ std::pair<int, int> PolyTailCalculator::determine_signal_bounds(int signal_ancho
 
     // Maximum variance between consecutive values to be
     // considered part of the same interval.
-    const float kVar = 0.35f;
+    const float kVar = 0.5f;
     // How close the mean values should be for consecutive intervals
     // to be merged.
     const float kMeanValueProximity = 0.2f;
@@ -69,39 +75,55 @@ std::pair<int, int> PolyTailCalculator::determine_signal_bounds(int signal_ancho
             std::max(static_cast<int>(std::round(10 * num_samples_per_base)), 200);
     // Floor for average signal value of poly tail.
     const float kMinAvgVal = min_avg_val();
-
     auto [left_end, right_end] = signal_range(signal_anchor, signal_len, num_samples_per_base);
-    spdlog::trace("Bounds left {}, right {}", left_end, right_end);
-
+    if (fwd){
+      right_end = signal_anchor;
+    } else {
+      left_end = signal_anchor;
+    }
+    spdlog::debug("Bounds left {}, right {}, signal_len {}", left_end, right_end, signal_len);
     std::vector<std::pair<int, int>> intervals;
     const int kStride = 3;
     for (int s = left_end; s < right_end; s += kStride) {
         int e = std::min(s + kMaxSampleGap, right_end);
-        auto [avg, stdev] = calc_stats(s, e);
+	auto [avg, stdev] = calc_stats(s, e);
+	spdlog::trace("s = {}, e = {}, stdev= {}", s, e, stdev);
         if (stdev < kVar) {
+	  spdlog::trace("s = {}, e = {}, stdev= {}", s, e, stdev);
             // If a new interval overlaps with the previous interval, just extend
             // the previous interval.
-            if (intervals.size() > 1 && intervals.back().second >= s &&
-                std::abs(avg - last_interval_stats.first) < kMeanValueProximity &&
-                (avg > kMinAvgVal)) {
-                auto& last = intervals.back();
-                spdlog::trace("extend interval {}-{} to {}-{} avg {} stdev {}", last.first,
-                              last.second, s, e, avg, stdev);
-                last.second = e;
-            } else {
-                // Attempt to merge the most recent interval and the one before
+	  if (intervals.size() > 1 && intervals.back().second >= s){
+	    auto [avg_int, stdev_int] = calc_stats(intervals.back().first, intervals.back().second);
+	    spdlog::trace("interval left {}, right {}, diff means {}", intervals.back().first, intervals.back().second, std::abs(avg-avg_int));		    
+	    if (intervals.size() > 1 && intervals.back().second >= s &&
+		std::abs(avg - last_interval_stats.first) < kMeanValueProximity &&
+		(avg > kMinAvgVal) &&
+		(std::abs(avg - avg_int) < kMeanValueProximity)) { 
+	      auto& last = intervals.back();
+	      spdlog::trace("extend interval {}-{} to {}-{} avg {} stdev {}", last.first,
+			    last.second, last.first, e, avg, stdev);
+	      last.second = e;
+	    }
+	  } else {
+	    // Attempt to merge the most recent interval and the one before
                 // that if the gap between the intervals is small and both of the
                 // intervals are longer than some threshold.
                 if (intervals.size() >= 2) {
                     auto& last = intervals.back();
                     auto& second_last = intervals[intervals.size() - 2];
-                    spdlog::trace("Evaluate for merge {}-{} with {}-{}", second_last.first,
-                                  second_last.second, last.first, last.second);
-                    if ((last.first - second_last.second < kMaxSampleGap) &&
-                        (last.second - last.first > kMinIntervalSizeForMerge) &&
-                        (second_last.second - second_last.first > kMinIntervalSizeForMerge)) {
-                        spdlog::trace("Merge interval {}-{} with {}-{}", second_last.first,
-                                      second_last.second, second_last.first, last.second);
+		    auto [avg2, stdev2] = calc_stats(last.first, last.second);
+		    auto [avg3, stdev3] = calc_stats(second_last.first, second_last.second);
+                    // spdlog::debug("Evaluate for merge {}-{} with {}-{}", second_last.first,
+                                  // second_last.second, last.first, last.second);
+		    spdlog::trace("1.  {} < {}; 2. {} > {};  {} >  {};   {} < 0.2", 
+				  last.first - second_last.second, kMaxSampleGap, last.second - last.first,
+				  kMaxSampleGap, second_last.second - second_last.first, kMinIntervalSizeForMerge, std::abs(avg3-avg2));
+		    if ((last.first - second_last.second < kMaxSampleGap) &&
+			(last.second - last.first > kMinIntervalSizeForMerge) &&
+                        (second_last.second - second_last.first > kMinIntervalSizeForMerge) &&
+			(std::abs(avg3 - avg2) < 0.3)) {
+		      spdlog::trace("Merge interval {}-{} with {}-{}", second_last.first,
+                                      second_last.second, last.first, last.second);
                         second_last.second = last.second;
                         intervals.pop_back();
                     } else if (second_last.second - second_last.first <
@@ -135,8 +157,14 @@ std::pair<int, int> PolyTailCalculator::determine_signal_bounds(int signal_ancho
             clustered_intervals.push_back(i);
         } else {
             auto& last = clustered_intervals.back();
-            if (std::abs(i.first - last.second) < kMaxInterruption) {
-                last.second = i.second;
+	    auto [avg2, stdev2] = calc_stats(last.first, last.second);
+	    auto [avg3, stdev3] = calc_stats(i.first, i.second);
+	    // spdlog::debug("potential clustered intervals : {}-{} and = {}-{}",  last.first, last.second, i.first, i.second);
+	    spdlog::debug("average 1 = {}, average2 = {}", avg2, avg3);
+            if (std::abs(i.first - last.second) < kMaxInterruption &&
+		std::abs(avg3 - avg2) < 0.3) {
+	      spdlog::debug("clustered intervals : end first = {}, start second = {}",  last.second, i.first);
+	      last.second = i.second;
             } else {
                 clustered_intervals.push_back(i);
             }
@@ -154,7 +182,8 @@ std::pair<int, int> PolyTailCalculator::determine_signal_bounds(int signal_ancho
     std::vector<std::pair<int, int>> filtered_intervals;
     std::copy_if(clustered_intervals.begin(), clustered_intervals.end(),
                  std::back_inserter(filtered_intervals), [&](auto& i) {
-                     int buffer = i.second - i.first;
+		     //int buffer = i.second - i.first;
+		     int buffer = 400;
                      // Only keep intervals that are close-ish to the signal anchor.
                      // i.e. the anchor needs to be within the buffer region of
                      // the interval. The buffer is currently the length of the interval
@@ -165,6 +194,7 @@ std::pair<int, int> PolyTailCalculator::determine_signal_bounds(int signal_ancho
                      // <----buffer---|--- interval ---|---- buffer---->
                      bool within_anchor_dist = (signal_anchor >= std::max(0, i.first - buffer)) &&
                                                (signal_anchor <= (i.second + buffer));
+		     // personal code where I choose 200 instead of the buffer
                      return within_anchor_dist;
                  });
 
@@ -172,7 +202,7 @@ std::pair<int, int> PolyTailCalculator::determine_signal_bounds(int signal_ancho
     for (const auto& in : filtered_intervals) {
         int_str += std::to_string(in.first) + "-" + std::to_string(in.second) + ", ";
     }
-    spdlog::trace("filtered intervals {}", int_str);
+    spdlog::debug("filtered intervals {}", int_str);
 
     if (filtered_intervals.empty()) {
         spdlog::trace("Anchor {} No range within anchor proximity found", signal_anchor);
@@ -205,10 +235,11 @@ std::pair<int, int> PolyTailCalculator::determine_signal_bounds(int signal_ancho
 }
 
 int PolyTailCalculator::calculate_num_bases(const SimplexRead& read,
-                                            const SignalAnchorInfo& signal_info) const {
-    spdlog::trace("{} Strand {}; poly A/T signal anchor {}", read.read_common.read_id,
+                                            const SignalAnchorInfo& signal_info
+					    ) const {
+    spdlog::debug("{} Strand {}; poly A/T signal anchor {}", read.read_common.read_id,
                   signal_info.is_fwd_strand ? '+' : '-', signal_info.signal_anchor);
-
+    
     auto num_samples_per_base = estimate_samples_per_base(read);
 
     // Walk through signal. Require a minimum of length 10 poly-A since below that
@@ -222,27 +253,57 @@ int PolyTailCalculator::calculate_num_bases(const SimplexRead& read,
     int num_bases = int(std::round(static_cast<float>(signal_len) / num_samples_per_base)) -
                     signal_info.trailing_adapter_bases;
 
-    spdlog::trace(
+    spdlog::debug(
             "{} PolyA bases {}, signal anchor {} Signal range is {} {} Signal length "
             "{}, samples/base {} trim {} read len {}",
             read.read_common.read_id, num_bases, signal_info.signal_anchor, signal_start,
             signal_end, signal_len, num_samples_per_base, read.read_common.num_trimmed_samples,
             read.read_common.seq.length());
-
+    spdlog::debug("{}", read.read_common.get_raw_data_samples());
+    if (! m_debug_path.empty())
+      {
+	std::string strand = signal_info.is_fwd_strand ? "plus" : "minus";
+	fs::create_directories(m_debug_path);
+	const c10::Half* sig = static_cast<c10::Half*>(read.read_common.raw_data.data_ptr());
+	std::ofstream myfile;
+	std::string file_name = read.read_common.read_id + "_" + std::to_string(num_bases) + "_" +
+	  std::to_string(signal_info.signal_anchor)+ "_" + std::to_string(signal_start) + "_" +std::to_string(signal_end)+ "_" +
+	  std::to_string(static_cast<int>(num_samples_per_base))+ "_"+   std::to_string(read.read_common.num_trimmed_samples) + "_" +
+	  std::to_string(read.read_common.seq.length()) + "_" +  strand  +".txt";
+	const auto seq_to_sig_map = dorado::utils::moves_to_map(read.read_common.moves, read.read_common.model_stride,
+								read.read_common.get_raw_data_samples(), read.read_common.seq.length() + 1);
+	file_name = m_debug_path + "/" + file_name ;
+	myfile.open (file_name);
+	int i;
+	int j = 0;
+	std::string base_called;
+	  for(i=0 ; i < int(read.read_common.get_raw_data_samples()) ; i++)
+	  {
+	    base_called = ".";
+	    if (i == int(seq_to_sig_map[j]))
+	      {
+		base_called = read.read_common.seq[j];
+		j+=1;
+	      }
+	    myfile  << i << "\t" << sig[i] << "\t" << base_called << std::endl;
+	  }
+	myfile.close();
+      }
     return num_bases;
 }
 
 std::shared_ptr<const PolyTailCalculator> PolyTailCalculatorFactory::create(
         bool is_rna,
-        const std::string& config_file) {
+        const std::string& config_file,
+	const std::string& debug_path) {
     auto config = prepare_config(config_file);
     if (is_rna) {
-        return std::make_unique<RNAPolyTailCalculator>(std::move(config));
+      return std::make_unique<RNAPolyTailCalculator>(std::move(config),"");
     }
     if (config.is_plasmid) {
-        return std::make_unique<PlasmidPolyTailCalculator>(std::move(config));
+      return std::make_unique<PlasmidPolyTailCalculator>(std::move(config),"");
     }
-    return std::make_unique<DNAPolyTailCalculator>(std::move(config));
+    return std::make_unique<DNAPolyTailCalculator>(std::move(config), debug_path);
 }
 
 }  // namespace dorado::poly_tail

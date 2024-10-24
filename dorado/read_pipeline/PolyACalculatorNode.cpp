@@ -37,11 +37,11 @@ void PolyACalculatorNode::input_thread_fn() {
         auto signal_info = calculator->determine_signal_anchor_and_strand(*read);
 
         if (signal_info.signal_anchor >= 0) {
-            int num_bases = calculator->calculate_num_bases(*read, signal_info);
+	  int num_bases = calculator->calculate_num_bases(*read, signal_info );
             if (signal_info.split_tail) {
                 auto split_bases = std::max(
                         0, calculator->calculate_num_bases(*read, {signal_info.is_fwd_strand, 0, 0,
-                                                                   signal_info.split_tail}));
+			      signal_info.split_tail}));
                 num_bases += split_bases;
             }
 

@@ -146,7 +146,8 @@ void setup(const std::vector<std::string>& args,
            const std::string& polya_config,
            const ModelSelection& model_selection,
            std::shared_ptr<const dorado::demux::BarcodingInfo> barcoding_info,
-           std::unique_ptr<const utils::SampleSheet> sample_sheet) {
+           std::unique_ptr<const utils::SampleSheet> sample_sheet,
+           const std::string& debug_polya_dir_path){
     spdlog::debug(model_config.to_string());
     const std::string model_name = models::extract_model_name_from_path(model_config.model_path);
     const std::string modbase_model_names = models::extract_model_names_from_paths(remora_models);
@@ -308,9 +309,9 @@ void setup(const std::vector<std::string>& args,
     }
     if (estimate_poly_a) {
         auto poly_tail_calculator = poly_tail::PolyTailCalculatorFactory::create(
-                is_rna_model(model_config), polya_config);
+		is_rna_model(model_config), polya_config, debug_polya_dir_path);
         client_info->contexts().register_context<const poly_tail::PolyTailCalculator>(
-                std::move(poly_tail_calculator));
+		std::move(poly_tail_calculator));
         current_sink_node = pipeline_desc.add_node<PolyACalculatorNode>(
                 {current_sink_node}, std::thread::hardware_concurrency(), 1000);
     }
@@ -575,8 +576,12 @@ int basecaller(int argc, char* argv[]) {
             .default_value(false)
             .implicit_value(true);
     parser.visible.add_argument("--poly-a-config")
-            .help("Configuration file for PolyA estimation to change default behaviours")
-            .default_value(std::string(""));
+      .help("Configuration file for PolyA estimation to change default behaviours")
+      .default_value(std::string(""));
+    parser.visible.add_argument("--debug-polya-dir-path")
+      .help("output dir for polyA log files")
+      .default_value(std::string(""));
+
 
     cli::add_minimap2_arguments(parser, alignment::DEFAULT_MM_PRESET);
     cli::add_internal_arguments(parser);
@@ -667,8 +672,10 @@ int basecaller(int argc, char* argv[]) {
     }
 
     std::string polya_config = "";
+    std::string debug_polya_dir_path= "";
     if (parser.visible.get<bool>("--estimate-poly-a")) {
         polya_config = parser.visible.get<std::string>("--poly-a-config");
+	debug_polya_dir_path = parser.visible.get<std::string>("--debug-polya-dir-path");
     }
 
     if (parser.visible.is_used("--kit-name") && parser.visible.is_used("--barcode-arrangement")) {
@@ -756,10 +763,11 @@ int basecaller(int argc, char* argv[]) {
               parser.hidden.get<std::string>("--dump_stats_filter"),
               parser.visible.get<std::string>("--resume-from"), no_trim_adapters, no_trim_primers,
               custom_primer_file, resume_parser, parser.visible.get<bool>("--estimate-poly-a"),
-              polya_config, model_selection, std::move(barcoding_info), std::move(sample_sheet));
+              polya_config, model_selection, std::move(barcoding_info), std::move(sample_sheet),
+	      debug_polya_dir_path);
     } catch (const std::exception& e) {
-        spdlog::error("{}", e.what());
-        utils::clean_temporary_models(temp_download_paths);
+      spdlog::error("{}", e.what());
+      utils::clean_temporary_models(temp_download_paths);
         return EXIT_FAILURE;
     }
 

@@ -1,6 +1,8 @@
 #include "poly_tail_config.h"
 
 #include "utils/sequence_utils.h"
+#include <spdlog/spdlog.h>
+
 
 #include <toml.hpp>
 #include <toml/value.hpp>
@@ -15,14 +17,16 @@ namespace dorado::poly_tail {
 
 PolyTailConfig prepare_config(std::istream& is) {
     PolyTailConfig config;
-
     const toml::value config_toml = toml::parse(is);
 
     if (config_toml.contains("anchors")) {
         const auto& anchors = toml::find(config_toml, "anchors");
 
         if (anchors.contains("front_primer") || anchors.contains("rear_primer")) {
-            if (!(anchors.contains("front_primer") && anchors.contains("rear_primer"))) {
+	  spdlog::debug("pass first test");
+	  
+	  if (!(anchors.contains("front_primer") && anchors.contains("rear_primer"))) {
+	    spdlog::debug("fail second test");
                 throw std::runtime_error(
                         "Both front_primer and rear_primer must be provided in the PolyA "
                         "configuration file.");
