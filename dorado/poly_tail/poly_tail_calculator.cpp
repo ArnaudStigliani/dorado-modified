@@ -13,15 +13,16 @@
 #include <cmath>
 #include <filesystem>
 
+
 namespace fs = std::filesystem;
 
 namespace dorado::poly_tail {
-
+  
 namespace {
-const int kMaxTailLength = PolyTailCalculator::max_tail_length();
+    const int kMaxTailLength = PolyTailCalculator::max_tail_length();
 }
-
-float PolyTailCalculator::estimate_samples_per_base(const dorado::SimplexRead& read) const {
+  
+  float PolyTailCalculator::estimate_samples_per_base(const dorado::SimplexRead& read) const {
     const size_t num_bases = read.read_common.seq.length();
     const auto num_samples = read.read_common.get_raw_data_samples();
     const auto stride = read.read_common.model_stride;
@@ -35,204 +36,235 @@ float PolyTailCalculator::estimate_samples_per_base(const dorado::SimplexRead& r
     
     return average_samples_per_base(sizes);
 }
+  
+  
+  /* Here is the begining of my personnal code
+     ####################################### */
 
+std::vector<c10::Half> rectify(const std::vector<c10::Half>& data) {
+    std::vector<c10::Half> rectified_data = data;
+    std::transform(rectified_data.begin(), rectified_data.end(), rectified_data.begin(), 
+                   [](c10::Half val) { return val < 0 ? -val : val; });
+    return rectified_data;
+}
 
+std::vector<c10::Half> truncate_spikes(const std::vector<c10::Half>& data, c10::Half threshold) {
+    std::vector<c10::Half> truncated_data = data;
+    std::for_each(truncated_data.begin(), truncated_data.end(), 
+                  [threshold](c10::Half& val) { if (val > threshold) val = threshold; });
+    return truncated_data;
+}
+
+  std::vector<c10::Half> z_normalize(const c10::Half* data, int data_size) {
+    // Check if data is empty to avoid division by zero
+    if (data_size == 0 ) {
+        return {};
+    }
+
+    // Compute mean
+    c10::Half sum=0.0;
+    for(int i=0 ; i< data_size ; ++i)
+      {
+	sum += static_cast<c10::Half>(data[i]);
+      }
+    c10::Half mean = sum / data_size;
+
+    c10::Half sq_sum=0.0;
+    for(int i=0 ; i< data_size ; ++i)
+      {
+	c10::Half value = static_cast<c10::Half>(data[i]);
+	sq_sum += value*value;
+      }
+    c10::Half variance = sq_sum / data_size - mean * mean;
+    c10::Half std_dev = std::sqrt(variance);
+    
+    // Compute standard deviation
+
+    // Handle edge case where standard deviation is zero
+    if (std_dev == 0) {
+        return std::vector<c10::Half>(data_size, 0.0);
+    }
+
+    // Z-normalize data
+    std::vector<c10::Half> norm_data;
+    norm_data.reserve(data_size);
+    for(int i=0 ; i< data_size ; ++i)
+      {
+	c10::Half value = static_cast<c10::Half>(data[i]);
+        norm_data.push_back((value - mean) / std_dev);	
+      }
+    return norm_data;
+  }
+
+std::vector<c10::Half> left_to_right_sliding_window_dna(const std::vector<c10::Half>& data, int window_size, int step = 1) {
+  int data_size = data.size();
+  std::vector<c10::Half> result(data_size, 0.0);
+
+  for (int i = 0; i <= data_size - window_size; i += step) {
+    c10::Half sum = std::accumulate(data.begin() + i, data.begin() + i + window_size, 0.0);
+    c10::Half mean = sum / window_size;
+        
+    // Set the moving average value for the window
+    for (int j = 0; j < window_size; ++j) {
+      result[i + j] = mean;
+    }
+  }
+
+  return result;
+}
+
+  std::vector<c10::Half> right_to_left_sliding_window_dna(const std::vector<c10::Half>& data, int window_size, int step = 1) {
+    int data_size = data.size();
+  std::vector<c10::Half> result(data_size, 0.0);
+  
+  for (int i = data_size - 1; i >= window_size - 1; i -= step) {
+    c10::Half sum = std::accumulate(data.begin() + i - window_size + 1, data.begin() + i + 1, 0.0);
+    c10::Half mean = sum / window_size;
+        
+    // Set the moving average value for the window
+    for (int j = 0; j < window_size; ++j) {
+      result[i - j] = mean;
+    }
+  }
+
+  return result;
+}
 
   
+  // std::vector<int> find_dna_tail_per_read(std::vector<c10::Half> raw_data,bool fwd, int anchor) {
+
 std::pair<int, int> PolyTailCalculator::determine_signal_bounds(int signal_anchor,
                                                                 bool fwd,
                                                                 const dorado::SimplexRead& read,
                                                                 float num_samples_per_base) const {
-    const c10::Half* signal = static_cast<c10::Half*>(read.read_common.raw_data.data_ptr());
-    int signal_len = int(read.read_common.get_raw_data_samples());
+  //
+  // Parameters
+  const int samples_per_nt = int(num_samples_per_base);
+  const c10::Half SPIKE_THRESHOLD = 2.0;
+  const int MOVING_WINDOW_SIZE = 30;
+  const int MAX_GAP_BETWEEN_TAILS = 20 * samples_per_nt; 
+  const c10::Half SLOPE_THRESHOLD = 0.20;
+  const int signal_len = int(read.read_common.get_raw_data_samples());
+  const c10::Half*  raw_data= static_cast<c10::Half*>(read.read_common.raw_data.data_ptr());
+  std::vector<c10::Half> norm_data = z_normalize(raw_data, signal_len );   // Z-normalize the data
 
-    auto calc_stats = [&](int s, int e) -> std::pair<float, float> {
-        float avg = 0;
-        for (int i = s; i < e; i++) {
-            avg += signal[i];
-        }
-        avg = avg / (e - s);
-        float var = 0;
-        for (int i = s; i < e; i++) {
-            var += (signal[i] - avg) * (signal[i] - avg);
-        }
-        var = var / (e - s);
-        return {avg, std::sqrt(var)};
-    };
+  if (fwd) {
+    std::reverse(norm_data.begin(), norm_data.end());   // Reverse polyA reads if necessary
+  }
+  
+  int read_length = norm_data.size();
+  int tail_start = (fwd) ? (read_length - signal_anchor) : signal_anchor;  
+  std::vector<c10::Half> rectified_data = rectify(norm_data); //abs value of data
+  std::vector<c10::Half> truncated_data = truncate_spikes(rectified_data, SPIKE_THRESHOLD); //cut everything > threshold
+  std::vector<c10::Half> smoothed_data_lr = left_to_right_sliding_window_dna(truncated_data, MOVING_WINDOW_SIZE, 1);
+  std::vector<c10::Half> smoothed_data_rl = right_to_left_sliding_window_dna(truncated_data, MOVING_WINDOW_SIZE, 1);
+  std::vector<c10::Half> smoothed_data(smoothed_data_lr.size(), 0); //initialize vector with 0
 
-    std::pair<float, float> last_interval_stats;
+  for (size_t i = 0; i < smoothed_data.size(); ++i) {
+    smoothed_data[i] = std::min(smoothed_data_lr[i], smoothed_data_rl[i]);
+  }
 
-    // Maximum variance between consecutive values to be
-    // considered part of the same interval.
-    const float kVar = 0.5f;
-    // How close the mean values should be for consecutive intervals
-    // to be merged.
-    const float kMeanValueProximity = 0.2f;
-    // Maximum gap between intervals that can be combined.
-    const int kMaxSampleGap = int(std::round(num_samples_per_base * 5));
-    // Minimum size of intervals considered for merge.
-    const int kMinIntervalSizeForMerge =
-            std::max(static_cast<int>(std::round(10 * num_samples_per_base)), 200);
-    // Floor for average signal value of poly tail.
-    const float kMinAvgVal = min_avg_val();
-    auto [left_end, right_end] = signal_range(signal_anchor, signal_len, num_samples_per_base);
-    if (fwd){
-      right_end = signal_anchor;
-    } else {
-      left_end = signal_anchor;
+  int window_size = 10;
+  int step_size = 10;
+  int start = tail_start;
+  int end =  read_length;
+  std::vector<c10::Half> data(truncated_data.begin() + start, truncated_data.begin() + end);
+  int total = data.size();
+  std::vector<c10::Half> mean_data(total / step_size, 0.0);
+  std::vector<c10::Half> slope(mean_data.size() - 1, 0.0);
+
+  for (size_t i = 0; i < mean_data.size() - 1; ++i) {
+    mean_data[i] = std::accumulate(data.begin() + i * step_size, data.begin() + (i + 1) * step_size, 0.0) / window_size;
+    mean_data[i + 1] = std::accumulate(data.begin() + (i + 1) * step_size, data.begin() + (i + 2) * step_size, 0.0) / window_size;
+    slope[i] = mean_data[i + 1] - mean_data[i];
+  }
+
+  // for (size_t i = 0; i < 100; ++i) {
+  //   std::cout << "mean data[" << i << "] = " << mean_data[i] << "\n";
+  // }
+  
+
+  std::optional<int> precise_tail_start = std::nullopt;
+  int k = 0;
+  while (k < 60 && k + 3 < int(slope.size())) {
+    bool slope_in_range = std::abs(slope[k]) < SLOPE_THRESHOLD &&
+					       std::abs(slope[k + 1]) < SLOPE_THRESHOLD &&
+									std::abs(slope[k + 2]) < SLOPE_THRESHOLD &&
+												 std::abs(slope[k + 3]) < SLOPE_THRESHOLD;
+
+    bool mean_in_range =  mean_data[k] < SLOPE_THRESHOLD + 0.15 &&
+					 mean_data[k + 1] < SLOPE_THRESHOLD + 0.15 &&
+							    mean_data[k + 2] < SLOPE_THRESHOLD + 0.15 &&
+									       mean_data[k + 3] < SLOPE_THRESHOLD + 0.15;
+    
+    if (slope_in_range && mean_in_range) {
+      precise_tail_start = k * window_size + tail_start;
+      break;
     }
-    spdlog::debug("Bounds left {}, right {}, signal_len {}", left_end, right_end, signal_len);
-    std::vector<std::pair<int, int>> intervals;
-    const int kStride = 3;
-    for (int s = left_end; s < right_end; s += kStride) {
-        int e = std::min(s + kMaxSampleGap, right_end);
-	auto [avg, stdev] = calc_stats(s, e);
-	spdlog::trace("s = {}, e = {}, stdev= {}", s, e, stdev);
-        if (stdev < kVar) {
-	  spdlog::trace("s = {}, e = {}, stdev= {}", s, e, stdev);
-            // If a new interval overlaps with the previous interval, just extend
-            // the previous interval.
-	  if (intervals.size() > 1 && intervals.back().second >= s){
-	    auto [avg_int, stdev_int] = calc_stats(intervals.back().first, intervals.back().second);
-	    spdlog::trace("interval left {}, right {}, diff means {}", intervals.back().first, intervals.back().second, std::abs(avg-avg_int));		    
-	    if (intervals.size() > 1 && intervals.back().second >= s &&
-		std::abs(avg - last_interval_stats.first) < kMeanValueProximity &&
-		(avg > kMinAvgVal) &&
-		(std::abs(avg - avg_int) < kMeanValueProximity)) { 
-	      auto& last = intervals.back();
-	      spdlog::trace("extend interval {}-{} to {}-{} avg {} stdev {}", last.first,
-			    last.second, last.first, e, avg, stdev);
-	      last.second = e;
+    ++k;
+  }
+  // std::cout << "k: " <<  k << "\n" ;
+  
+  int tail_end=0;
+  int width = 0;
+  int last_good_end = 0;
+  if (precise_tail_start) { //else, we will return tail_start=0;
+    tail_start = *precise_tail_start;
+    // Determine tail end
+    int i = k; //start the search from the precise boundaries (determined above)
+    c10::Half sm_data_threshold = fwd ? 0.6 : 0.3;
+    
+    while (i < int(slope.size())) {
+      if (std::abs(slope[i]) < SLOPE_THRESHOLD && smoothed_data[tail_start + i * window_size] < sm_data_threshold) { 
+	tail_end = i;
+	++i;
+      } else { // if there is gap in the tail
+	last_good_end = i; 
+	int small_glitch_count = 0;
+	bool quit_searching = false;
+	while (i < int(slope.size()))
+	  {
+	    // std::cout << "i - last_good_end: " <<  i - last_good_end << "\n" ;
+	    if (i - last_good_end  > (MAX_GAP_BETWEEN_TAILS / window_size)){
+	      quit_searching = true;
+	      break;
 	    }
-	  } else {
-	    // Attempt to merge the most recent interval and the one before
-                // that if the gap between the intervals is small and both of the
-                // intervals are longer than some threshold.
-                if (intervals.size() >= 2) {
-                    auto& last = intervals.back();
-                    auto& second_last = intervals[intervals.size() - 2];
-		    auto [avg2, stdev2] = calc_stats(last.first, last.second);
-		    auto [avg3, stdev3] = calc_stats(second_last.first, second_last.second);
-                    // spdlog::debug("Evaluate for merge {}-{} with {}-{}", second_last.first,
-                                  // second_last.second, last.first, last.second);
-		    spdlog::trace("1.  {} < {}; 2. {} > {};  {} >  {};   {} < 0.2", 
-				  last.first - second_last.second, kMaxSampleGap, last.second - last.first,
-				  kMaxSampleGap, second_last.second - second_last.first, kMinIntervalSizeForMerge, std::abs(avg3-avg2));
-		    if ((last.first - second_last.second < kMaxSampleGap) &&
-			(last.second - last.first > kMinIntervalSizeForMerge) &&
-                        (second_last.second - second_last.first > kMinIntervalSizeForMerge) &&
-			(std::abs(avg3 - avg2) < 0.3)) {
-		      spdlog::trace("Merge interval {}-{} with {}-{}", second_last.first,
-                                      second_last.second, last.first, last.second);
-                        second_last.second = last.second;
-                        intervals.pop_back();
-                    } else if (second_last.second - second_last.first <
-                               std::round(num_samples_per_base * m_config.min_base_count)) {
-                        intervals.erase(intervals.end() - 2);
-                    }
-                }
-                spdlog::trace("Add new interval {}-{} avg {} stdev {}", s, e, avg, stdev);
-                intervals.push_back({s, e});
-            }
-            last_interval_stats = {avg, stdev};
-        }
+ 	    if (std::abs(mean_data[i]) > SLOPE_THRESHOLD + 0.1) {
+	      small_glitch_count = 0;
+	      // std::cout << "mean_data = " << std::abs(mean_data[i]) << " > " << SLOPE_THRESHOLD + 0.1 <<  "\n";
+	      // std::cout << "index = " <<  i * window_size  + tail_start<< "\n" ;
+	    } else if (++small_glitch_count > 6) {
+	      break;
+	    }
+	    ++i;
+	  }
+	if (quit_searching) {
+	  width =  last_good_end - k;
+	  break;
+	}
+      }
     }
-
-    std::string int_str = "";
-    for (const auto& in : intervals) {
-        int_str += std::to_string(in.first) + "-" + std::to_string(in.second) + ", ";
-    }
-    spdlog::trace("found intervals {}", int_str);
-
-    // Cluster intervals if there are interrupted poly tails that should
-    // be combined. Interruption length is specified through a config file.
-    // In the example below, tail estimation show include both stretches
-    // of As along with the small gap in the middle.
-    // e.g. -----AAAAAAA--AAAAAA-----
-    const int kMaxInterruption =
-            static_cast<int>(std::round(num_samples_per_base * m_config.tail_interrupt_length));
-    std::vector<std::pair<int, int>> clustered_intervals;
-    for (const auto& i : intervals) {
-        if (clustered_intervals.empty()) {
-            clustered_intervals.push_back(i);
-        } else {
-            auto& last = clustered_intervals.back();
-	    auto [avg2, stdev2] = calc_stats(last.first, last.second);
-	    auto [avg3, stdev3] = calc_stats(i.first, i.second);
-	    // spdlog::debug("potential clustered intervals : {}-{} and = {}-{}",  last.first, last.second, i.first, i.second);
-	    spdlog::debug("average 1 = {}, average2 = {}", avg2, avg3);
-            if (std::abs(i.first - last.second) < kMaxInterruption &&
-		std::abs(avg3 - avg2) < 0.3) {
-	      spdlog::debug("clustered intervals : end first = {}, start second = {}",  last.second, i.first);
-	      last.second = i.second;
-            } else {
-                clustered_intervals.push_back(i);
-            }
-        }
-    }
-
-    int_str = "";
-    for (const auto& in : clustered_intervals) {
-        int_str += std::to_string(in.first) + "-" + std::to_string(in.second) + ", ";
-    }
-    spdlog::trace("clustered intervals {}", int_str);
-
-    // Once the clustered intervals are available, filter them by how
-    // close they are to the anchor.
-    std::vector<std::pair<int, int>> filtered_intervals;
-    std::copy_if(clustered_intervals.begin(), clustered_intervals.end(),
-                 std::back_inserter(filtered_intervals), [&](auto& i) {
-		     //int buffer = i.second - i.first;
-		     int buffer = 400;
-                     // Only keep intervals that are close-ish to the signal anchor.
-                     // i.e. the anchor needs to be within the buffer region of
-                     // the interval. The buffer is currently the length of the interval
-                     // itself. This heuristic generally works because a longer interval
-                     // detected is likely to be the correct one so we relax the
-                     // how close it needs to be to the anchor to account for errors
-                     // in anchor determination.
-                     // <----buffer---|--- interval ---|---- buffer---->
-                     bool within_anchor_dist = (signal_anchor >= std::max(0, i.first - buffer)) &&
-                                               (signal_anchor <= (i.second + buffer));
-		     // personal code where I choose 200 instead of the buffer
-                     return within_anchor_dist;
-                 });
-
-    int_str = "";
-    for (const auto& in : filtered_intervals) {
-        int_str += std::to_string(in.first) + "-" + std::to_string(in.second) + ", ";
-    }
-    spdlog::debug("filtered intervals {}", int_str);
-
-    if (filtered_intervals.empty()) {
-        spdlog::trace("Anchor {} No range within anchor proximity found", signal_anchor);
-        return {0, 0};
-    }
-
-    // Choose the longest interval. If there is a tie for the longest interval,
-    // choose the one that is closest to the anchor.
-    auto best_interval = std::max_element(filtered_intervals.begin(), filtered_intervals.end(),
-                                          [&](auto& l, auto& r) {
-                                              auto l_size = l.second - l.first;
-                                              auto r_size = r.second - r.first;
-                                              if (l_size != r_size) {
-                                                  return l_size < r_size;
-                                              } else {
-                                                  if (fwd) {
-                                                      return std::abs(l.second - signal_anchor) <
-                                                             std::abs(r.second - signal_anchor);
-                                                  } else {
-                                                      return std::abs(l.first - signal_anchor) <
-                                                             std::abs(r.first - signal_anchor);
-                                                  }
-                                              }
-                                          });
-
-    spdlog::trace("Anchor {} Range {} {}", signal_anchor, best_interval->first,
-                  best_interval->second);
-
-    return *best_interval;
+  }else {
+    tail_start=0;
+    tail_end=0;
+  }
+  if(tail_start != 0 &&  tail_end !=0){
+    tail_end =  tail_start + width  * window_size;
+    tail_start = tail_start;
+    int final_tail_start = fwd ? (read_length - tail_end) : tail_start;
+    int final_tail_end = fwd ? (read_length - tail_start) : tail_end;
+    std::pair<int,int> best_interval = {final_tail_start, final_tail_end};
+    return best_interval; 
+  }
+  return {0,0};
 }
+
+  
+  /* Here is the end of my personnal code
+     ####################################### */
+  
+
+  
 
 int PolyTailCalculator::calculate_num_bases(const SimplexRead& read,
                                             const SignalAnchorInfo& signal_info
@@ -291,11 +323,11 @@ int PolyTailCalculator::calculate_num_bases(const SimplexRead& read,
       }
     return num_bases;
 }
-
-std::shared_ptr<const PolyTailCalculator> PolyTailCalculatorFactory::create(
-        bool is_rna,
-        const std::string& config_file,
-	const std::string& debug_path) {
+  
+  std::shared_ptr<const PolyTailCalculator> PolyTailCalculatorFactory::create(
+									      bool is_rna,
+									      const std::string& config_file,
+									      const std::string& debug_path) {
     auto config = prepare_config(config_file);
     if (is_rna) {
       return std::make_unique<RNAPolyTailCalculator>(std::move(config),"");
@@ -304,6 +336,6 @@ std::shared_ptr<const PolyTailCalculator> PolyTailCalculatorFactory::create(
       return std::make_unique<PlasmidPolyTailCalculator>(std::move(config),"");
     }
     return std::make_unique<DNAPolyTailCalculator>(std::move(config), debug_path);
-}
-
+  }
+  
 }  // namespace dorado::poly_tail
