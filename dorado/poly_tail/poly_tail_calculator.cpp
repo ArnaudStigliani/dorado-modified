@@ -13,7 +13,6 @@
 #include <cmath>
 #include <filesystem>
 
-
 namespace fs = std::filesystem;
 
 namespace dorado::poly_tail {
@@ -55,45 +54,48 @@ std::vector<c10::Half> truncate_spikes(const std::vector<c10::Half>& data, c10::
     return truncated_data;
 }
 
-  std::vector<c10::Half> z_normalize(const c10::Half* data, int data_size) {
+std::vector<c10::Half> z_normalize(const c10::Half* data, int data_size) {
     // Check if data is empty to avoid division by zero
     if (data_size == 0 ) {
         return {};
     }
-
+    /* cast  double to keep the precision */
     // Compute mean
-    c10::Half sum=0.0;
+    double sum=0.0;
     for(int i=0 ; i< data_size ; ++i)
       {
-	sum += static_cast<c10::Half>(data[i]);
+	sum += static_cast<double>(data[i]);
       }
-    c10::Half mean = sum / data_size;
+    double mean = sum / data_size;
 
-    c10::Half sq_sum=0.0;
+    // c10::Half sq_sum=0.0;
+    double sq_sum=0.0;
     for(int i=0 ; i< data_size ; ++i)
       {
-	c10::Half value = static_cast<c10::Half>(data[i]);
+	double value = static_cast<double>(data[i]);
 	sq_sum += value*value;
       }
-    c10::Half variance = sq_sum / data_size - mean * mean;
-    c10::Half std_dev = std::sqrt(variance);
+    double variance = sq_sum / data_size - mean * mean;
+    double std_dev = std::sqrt(variance);
     
     // Compute standard deviation
 
     // Handle edge case where standard deviation is zero
     if (std_dev == 0) {
-        return std::vector<c10::Half>(data_size, 0.0);
+      return std::vector<c10::Half>(data_size, 0.0);
     }
 
     // Z-normalize data
-    std::vector<c10::Half> norm_data;
+    std::vector<double> norm_data;
     norm_data.reserve(data_size);
     for(int i=0 ; i< data_size ; ++i)
       {
-	c10::Half value = static_cast<c10::Half>(data[i]);
+	double value = static_cast<double>(data[i]);
         norm_data.push_back((value - mean) / std_dev);	
       }
-    return norm_data;
+  std::vector<c10::Half> norm_data_converted(norm_data.size());
+  std::transform(norm_data.begin(), norm_data.end(), norm_data_converted.begin(), [](c10::Half value) {return static_cast<c10::Half>(value);});
+  return norm_data_converted;
   }
 
 std::vector<c10::Half> left_to_right_sliding_window_dna(const std::vector<c10::Half>& data, int window_size, int step = 1) {
@@ -179,31 +181,47 @@ std::pair<int, int> PolyTailCalculator::determine_signal_bounds(int signal_ancho
     slope[i] = mean_data[i + 1] - mean_data[i];
   }
 
-  // for (size_t i = 0; i < 100; ++i) {
-  //   std::cout << "mean data[" << i << "] = " << mean_data[i] << "\n";
-  // }
   
-
   std::optional<int> precise_tail_start = std::nullopt;
   int k = 0;
-  while (k < 60 && k + 3 < int(slope.size())) {
+  std::vector<int> pass;
+  int poly_start_seach_window = 60;
+  
+  while (k < poly_start_seach_window && k + 3 < int(slope.size())) {
     bool slope_in_range = std::abs(slope[k]) < SLOPE_THRESHOLD &&
-					       std::abs(slope[k + 1]) < SLOPE_THRESHOLD &&
-									std::abs(slope[k + 2]) < SLOPE_THRESHOLD &&
-												 std::abs(slope[k + 3]) < SLOPE_THRESHOLD;
-
-    bool mean_in_range =  mean_data[k] < SLOPE_THRESHOLD + 0.15 &&
-					 mean_data[k + 1] < SLOPE_THRESHOLD + 0.15 &&
-							    mean_data[k + 2] < SLOPE_THRESHOLD + 0.15 &&
-									       mean_data[k + 3] < SLOPE_THRESHOLD + 0.15;
+      std::abs(slope[k + 1]) < SLOPE_THRESHOLD &&
+      std::abs(slope[k + 2]) < SLOPE_THRESHOLD &&
+      std::abs(slope[k + 3]) < SLOPE_THRESHOLD;
+    bool mean_in_range =  mean_data[k] < SLOPE_THRESHOLD + 0.2 &&
+      mean_data[k + 1] < SLOPE_THRESHOLD + 0.2 &&
+      mean_data[k + 2] < SLOPE_THRESHOLD + 0.2 &&
+      mean_data[k + 3] < SLOPE_THRESHOLD + 0.20;
+    bool mean_way_out =  mean_data[k] > SLOPE_THRESHOLD + 0.5 &&
+      mean_data[k + 1] > SLOPE_THRESHOLD + 0.5 &&
+      mean_data[k + 2] > SLOPE_THRESHOLD + 0.5 &&
+      mean_data[k + 3] > SLOPE_THRESHOLD + 0.5; //this is to avoid fake starts
     
-    if (slope_in_range && mean_in_range) {
-      precise_tail_start = k * window_size + tail_start;
-      break;
+    if (slope_in_range && mean_in_range) { //if the slope and mean are in the range
+      pass.push_back(0);
+    }
+    else if (mean_way_out){ // if the mean is way out of range
+      pass.push_back(2);
+    }else { // if the slope is out of range
+      pass.push_back(1);
     }
     ++k;
   }
-  // std::cout << "k: " <<  k << "\n" ;
+  /* Here, we find the best start. If there is a mean value way out of range
+  we will start the polyA/T  search  start from its position */  
+  auto last_two_pos = std::find(pass.rbegin(), pass.rend(), 2);
+  std::vector<int> pass2(last_two_pos.base(), pass.end());
+  auto zero_pos = std::find(pass2.begin(), pass2.end(), 0);
+  pass2.erase(pass2.begin(), zero_pos);
+
+  k = poly_start_seach_window - pass2.size(); // get index of the precise start (to extend the polyA/T end search window)
+  if (k != poly_start_seach_window) {
+    precise_tail_start = k * window_size + tail_start; // get precise start
+  }
   
   int tail_end=0;
   int width = 0;
@@ -224,15 +242,12 @@ std::pair<int, int> PolyTailCalculator::determine_signal_bounds(int signal_ancho
 	bool quit_searching = false;
 	while (i < int(slope.size()))
 	  {
-	    // std::cout << "i - last_good_end: " <<  i - last_good_end << "\n" ;
 	    if (i - last_good_end  > (MAX_GAP_BETWEEN_TAILS / window_size)){
 	      quit_searching = true;
 	      break;
 	    }
- 	    if (std::abs(mean_data[i]) > SLOPE_THRESHOLD + 0.1) {
+ 	    if (std::abs(mean_data[i]) > SLOPE_THRESHOLD + 0.3) {
 	      small_glitch_count = 0;
-	      // std::cout << "mean_data = " << std::abs(mean_data[i]) << " > " << SLOPE_THRESHOLD + 0.1 <<  "\n";
-	      // std::cout << "index = " <<  i * window_size  + tail_start<< "\n" ;
 	    } else if (++small_glitch_count > 6) {
 	      break;
 	    }
