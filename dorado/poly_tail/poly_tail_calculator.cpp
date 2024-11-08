@@ -54,6 +54,72 @@ std::vector<c10::Half> truncate_spikes(const std::vector<c10::Half>& data, c10::
     return truncated_data;
 }
 
+
+double standard_deviation(const c10::Half* data, int start, int end) {
+
+    /* cast  double to keep the precision */
+    // Compute mean
+    double sum=0.0;
+    for(int i=start ; i< end ; ++i)
+      {
+	sum += static_cast<double>(data[i]);
+      }
+    double mean = sum /(end -start) ;
+
+    
+  // Calculate the sum of squared differences
+    double sq_sum=0.0;
+    for(int i=start ; i< end ; ++i)
+      {
+	double value = static_cast<double>(data[i]);
+	sq_sum += value*value;
+      }
+    double variance = sq_sum / (end -start) - mean * mean;
+    double std_dev = std::sqrt(variance);
+  
+  // Compute the standard deviation and cast to c10::Half
+  return std_dev;
+}
+
+  std::pair<int,int> checkTailConfidence(std::pair<int,int>& interval, 
+				     const c10::Half* raw_data,
+				     int& data_size, bool& fwd) {
+    int tail_start = interval.first;
+    int tail_end = interval.second;
+  if (tail_end != 0 && tail_start != 0) { // using -1 for NA equivalent in C++
+    int mid_notail=0;
+    int length_no_tail = 0;
+    double tail_prox_transcript_variance = 0.0;
+    if (fwd){
+      length_no_tail =  tail_start;
+      mid_notail = length_no_tail / 2;
+      tail_prox_transcript_variance = standard_deviation(raw_data, 0 , mid_notail);
+    }else {
+      length_no_tail = data_size - tail_end;
+      mid_notail = tail_end + length_no_tail / 2;
+      tail_prox_transcript_variance = standard_deviation(raw_data, mid_notail , data_size -1 );
+    }
+    double tail_variance = standard_deviation(raw_data, tail_start, tail_end);
+    int tail_length = tail_end - tail_start;
+    // more stringent requirement of low variance for shorter tails
+    if (tail_length > 20) {
+      if (tail_variance > tail_prox_transcript_variance / 2.5) 	{ // fake tail
+	tail_start = 0;
+	tail_end = 0;
+	tail_length = 0;
+	}
+    } else {
+      if (tail_variance > tail_prox_transcript_variance / 3.5) { // fake tail
+	tail_start = 0;
+	tail_end = 0;
+	tail_length = 0;
+      }
+    }
+    return {tail_start, tail_end};
+  }
+  return {0, 0};
+}
+
 std::vector<c10::Half> z_normalize(const c10::Half* data, int data_size) {
     // Check if data is empty to avoid division by zero
     if (data_size == 0 ) {
@@ -166,8 +232,8 @@ std::pair<int, int> PolyTailCalculator::determine_signal_bounds(int signal_ancho
     smoothed_data[i] = std::min(smoothed_data_lr[i], smoothed_data_rl[i]);
   }
 
-  int window_size = 10;
-  int step_size = 10;
+  int window_size = 20;
+  int step_size = 20;
   int start = tail_start;
   int end =  read_length;
   std::vector<c10::Half> data(truncated_data.begin() + start, truncated_data.begin() + end);
@@ -189,17 +255,17 @@ std::pair<int, int> PolyTailCalculator::determine_signal_bounds(int signal_ancho
   
   while (k < poly_start_seach_window && k + 3 < int(slope.size())) {
     bool slope_in_range = std::abs(slope[k]) < SLOPE_THRESHOLD &&
-      std::abs(slope[k + 1]) < SLOPE_THRESHOLD &&
-      std::abs(slope[k + 2]) < SLOPE_THRESHOLD &&
-      std::abs(slope[k + 3]) < SLOPE_THRESHOLD;
+					       std::abs(slope[k + 1]) < SLOPE_THRESHOLD; // &&
+      // std::abs(slope[k + 2]) < SLOPE_THRESHOLD &&
+      // std::abs(slope[k + 3]) < SLOPE_THRESHOLD;
     bool mean_in_range =  mean_data[k] < SLOPE_THRESHOLD + 0.2 &&
-      mean_data[k + 1] < SLOPE_THRESHOLD + 0.2 &&
-      mean_data[k + 2] < SLOPE_THRESHOLD + 0.2 &&
-      mean_data[k + 3] < SLOPE_THRESHOLD + 0.20;
-    bool mean_way_out =  mean_data[k] > SLOPE_THRESHOLD + 0.5 &&
-      mean_data[k + 1] > SLOPE_THRESHOLD + 0.5 &&
-      mean_data[k + 2] > SLOPE_THRESHOLD + 0.5 &&
-      mean_data[k + 3] > SLOPE_THRESHOLD + 0.5; //this is to avoid fake starts
+					 mean_data[k + 1] < SLOPE_THRESHOLD + 0.2; // &&
+      // mean_data[k + 2] < SLOPE_THRESHOLD + 0.2 &&
+      // mean_data[k + 3] < SLOPE_THRESHOLD + 0.20;
+    bool mean_way_out =  mean_data[k] > SLOPE_THRESHOLD + 0.4 &&
+					 mean_data[k + 1] > SLOPE_THRESHOLD + 0.4; // &&
+      // mean_data[k + 2] > SLOPE_THRESHOLD + 0.5 &&
+      // mean_data[k + 3] > SLOPE_THRESHOLD + 0.5; //this is to avoid fake starts
     
     if (slope_in_range && mean_in_range) { //if the slope and mean are in the range
       pass.push_back(0);
@@ -211,18 +277,29 @@ std::pair<int, int> PolyTailCalculator::determine_signal_bounds(int signal_ancho
     }
     ++k;
   }
+
+  
   /* Here, we find the best start. If there is a mean value way out of range
   we will start the polyA/T  search  start from its position */  
   auto last_two_pos = std::find(pass.rbegin(), pass.rend(), 2);
   std::vector<int> pass2(last_two_pos.base(), pass.end());
   auto zero_pos = std::find(pass2.begin(), pass2.end(), 0);
   pass2.erase(pass2.begin(), zero_pos);
-
-  k = poly_start_seach_window - pass2.size(); // get index of the precise start (to extend the polyA/T end search window)
+  // get index of the precise start (to extend the polyA/T end search window)
+  k = poly_start_seach_window - pass2.size();
+  // If there is no 0 in the vector, we will start the search from the beginning,
+  // whether there is a mean value way out of range or not//
+  if(pass2.size() ==0)
+    {
+      zero_pos =  std::find(pass.begin(), pass.end(), 0);
+      std::vector<int> pass3(pass.begin(), zero_pos);
+      k=pass3.size();
+    }
+  // k=54;
   if (k != poly_start_seach_window) {
     precise_tail_start = k * window_size + tail_start; // get precise start
   }
-  
+
   int tail_end=0;
   int width = 0;
   int last_good_end = 0;
@@ -230,7 +307,7 @@ std::pair<int, int> PolyTailCalculator::determine_signal_bounds(int signal_ancho
     tail_start = *precise_tail_start;
     // Determine tail end
     int i = k; //start the search from the precise boundaries (determined above)
-    c10::Half sm_data_threshold = fwd ? 0.6 : 0.3;
+    c10::Half sm_data_threshold = fwd ? 0.6 : 0.4;
     
     while (i < int(slope.size())) {
       if (std::abs(slope[i]) < SLOPE_THRESHOLD && smoothed_data[tail_start + i * window_size] < sm_data_threshold) { 
@@ -248,7 +325,7 @@ std::pair<int, int> PolyTailCalculator::determine_signal_bounds(int signal_ancho
 	    }
  	    if (std::abs(mean_data[i]) > SLOPE_THRESHOLD + 0.3) {
 	      small_glitch_count = 0;
-	    } else if (++small_glitch_count > 6) {
+	    } else if (++small_glitch_count > 3) {
 	      break;
 	    }
 	    ++i;
@@ -269,6 +346,7 @@ std::pair<int, int> PolyTailCalculator::determine_signal_bounds(int signal_ancho
     int final_tail_start = fwd ? (read_length - tail_end) : tail_start;
     int final_tail_end = fwd ? (read_length - tail_start) : tail_end;
     std::pair<int,int> best_interval = {final_tail_start, final_tail_end};
+    best_interval = checkTailConfidence(best_interval, raw_data, read_length, fwd);
     return best_interval; 
   }
   return {0,0};
