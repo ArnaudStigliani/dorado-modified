@@ -10,7 +10,7 @@ namespace dorado::poly_tail {
     /* std::string rear_primer = "ACTTGCCTGTCGCTCTATCTTCAGAGGAGAGTCCGCCGCCCGCAAGTTTT";  // VNP */
     std::string front_primer = "";                          // SSP
     /* std::string rear_primer = "GACATACCGTGAATCGCTATCCTATGTTCATCCGCACAAAGACACCGACAACTTTCTT";  // VNP */
-    std::string rear_primer = "ATCCGCACAAAGACACCGACAACTTTCTT";  // VNP
+    std::string rear_primer = "ATCCGCACAAAGACACCGACAACTTTCTT";  // VNP */
     std::string rc_front_primer;
     std::string rc_rear_primer;
     std::string plasmid_front_flank;
