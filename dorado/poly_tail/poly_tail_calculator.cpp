@@ -221,7 +221,11 @@ std::pair<int, int> PolyTailCalculator::determine_signal_bounds(int signal_ancho
   }
   
   int read_length = norm_data.size();
-  int tail_start = (fwd) ? (read_length - signal_anchor) : signal_anchor;  
+  int tail_start = (fwd) ? (read_length - signal_anchor) : signal_anchor;
+  // Guard against anchors outside the signal
+  if (tail_start < 0 || tail_start >= read_length) {
+    return {0, 0};
+  }
   std::vector<c10::Half> rectified_data = rectify(norm_data); //abs value of data
   std::vector<c10::Half> truncated_data = truncate_spikes(rectified_data, SPIKE_THRESHOLD); //cut everything > threshold
   std::vector<c10::Half> smoothed_data_lr = left_to_right_sliding_window_dna(truncated_data, MOVING_WINDOW_SIZE, 1);
@@ -238,6 +242,10 @@ std::pair<int, int> PolyTailCalculator::determine_signal_bounds(int signal_ancho
   int end =  read_length;
   std::vector<c10::Half> data(truncated_data.begin() + start, truncated_data.begin() + end);
   int total = data.size();
+  // Too little signal to analyse (also avoids size_t underflow below)
+  if (total < 2 * step_size) {
+    return {0, 0};
+  }
   std::vector<c10::Half> mean_data(total / step_size, 0.0);
   std::vector<c10::Half> slope(mean_data.size() - 1, 0.0);
 
@@ -298,7 +306,8 @@ std::pair<int, int> PolyTailCalculator::determine_signal_bounds(int signal_ancho
   auto zero_pos = std::find(pass2.begin(), pass2.end(), 0);
   pass2.erase(pass2.begin(), zero_pos);
   // get index of the precise start (to extend the polyA/T end search window)
-  k = poly_start_seach_window - pass2.size();
+  const int search_origin = tail_start;  // slope[i] is relative to this position
+  k = int(pass.size()) - int(pass2.size());
   // If there is no 0 in the vector, we will start the search from the beginning,
   // whether there is a mean value way out of range or not//
   if(pass2.size() ==0)
@@ -308,7 +317,7 @@ std::pair<int, int> PolyTailCalculator::determine_signal_bounds(int signal_ancho
       k=pass3.size();
     }
   // k=54;
-  if (k != poly_start_seach_window) {
+  if (k != int(pass.size())) {
     precise_tail_start = k * window_size + tail_start; // get precise start
   }
 
@@ -322,7 +331,7 @@ std::pair<int, int> PolyTailCalculator::determine_signal_bounds(int signal_ancho
     c10::Half sm_data_threshold = fwd ? 5 : 5;
     
     while (i < int(slope.size())) {
-      if (std::abs(slope[i]) < SLOPE_THRESHOLD && smoothed_data[tail_start + i * window_size] < sm_data_threshold) { 
+      if (std::abs(slope[i]) < SLOPE_THRESHOLD && smoothed_data[search_origin + i * window_size] < sm_data_threshold) { 
 	tail_end = i;
 	++i;
       } else { // if there is gap in the tail
